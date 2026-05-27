@@ -50,6 +50,8 @@ Explore working code examples for common Connector SDK use cases. These [example
 
 Explore ready-to-use full connectors to get started. These connectors are useful when you want a stronger starting point or want to adapt an existing implementation for your source. For the full list, see the [Community Connectors Catalog](https://github.com/fivetran/fivetran_csdk_connectors/blob/main/README.md).
 
+- [beehiiv](connectors/beehiiv/README.md) - Syncs newsletter data from the beehiiv API including publications, subscriptions, posts, email blasts, automations, engagements, and more (17 tables). Supports incremental sync with cursor-based and page-number pagination.
+
 
 ## AI and Connector SDK
 - [Readme](https://github.com/fivetran/fivetran_connector_sdk/blob/main/all_things_ai/tutorials/README.md) - This is an introduction to using AI tools to leverage Connector SDK.
