@@ -36,13 +36,6 @@ __ENGAGEMENTS_MAX_DAYS_PER_REQUEST = 31  # Maximum days per engagement API reque
 __RATE_LIMIT_STATUS_CODE = 429  # HTTP status code for rate limiting
 __SERVER_ERROR_MIN_STATUS = 500  # Minimum HTTP status code for server errors
 
-# Tables that use incremental sync (keyed by state variable name)
-__INCREMENTAL_TABLES = {
-    "subscriptions": "subscriptions_last_created",
-    "posts": "posts_last_created",
-    "email_blasts": "email_blasts_last_created",
-}
-
 
 def validate_configuration(configuration: dict):
     """Validate the configuration dictionary to ensure it contains all required parameters.
@@ -207,11 +200,12 @@ def make_api_request(url, api_key, params=None):
             response.raise_for_status()
             return response.json()
 
-        except requests.exceptions.Timeout:
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
             if attempt == __MAX_RETRIES:
-                raise RuntimeError(f"Request timed out after {__MAX_RETRIES} retries: {url}")
+                raise RuntimeError(f"Request failed after {__MAX_RETRIES} retries: {url}: {e}")
             log.warning(
-                f"Timeout on {url}. Retrying in {backoff}s " f"(attempt {attempt}/{__MAX_RETRIES})"
+                f"{type(e).__name__} on {url}. Retrying in {backoff}s "
+                f"(attempt {attempt}/{__MAX_RETRIES})"
             )
             time.sleep(backoff)
             backoff = min(backoff * 2, __MAX_BACKOFF_SEC)
@@ -347,18 +341,20 @@ def sync_subscriptions(api_key, publication_id, state):
             "newsletter_lists",
         ]
     }
-    if last_created:
-        expand_params["created_after"] = last_created
 
     records_processed = 0
     new_last_created = last_created
 
     for record in paginate_cursor(url, api_key, expand_params):
+        record_created = record.get("created")
+
+        # Skip records we have already synced (client-side incremental filter)
+        if last_created and record_created and record_created <= last_created:
+            continue
+
         op.upsert(table="subscriptions", data=record)
         records_processed += 1
 
-        # Track the latest created timestamp for incremental sync
-        record_created = record.get("created")
         if record_created and (new_last_created is None or record_created > new_last_created):
             new_last_created = record_created
 
@@ -609,8 +605,7 @@ def sync_referral_program(api_key, publication_id, state):
             op.upsert(table="referral_program", data=record)
             count += 1
         log.info(f"Referral program sync complete: {count} records")
-    except RuntimeError as e:
-        # Referral program may not be enabled; log and continue
+    except (RuntimeError, requests.exceptions.HTTPError) as e:
         log.warning(f"Could not fetch referral_program: {e}")
 
     op.checkpoint(state)
@@ -645,6 +640,8 @@ def sync_engagements(api_key, publication_id, state):
     url = f"{__API_BASE_URL}/publications/{publication_id}/engagements"
     records_processed = 0
 
+    last_successful_date = start_date
+
     while start_date <= today:
         days_to_fetch = min(__ENGAGEMENTS_MAX_DAYS_PER_REQUEST, (today - start_date).days + 1)
         params = {
@@ -658,12 +655,14 @@ def sync_engagements(api_key, publication_id, state):
             for record in data:
                 op.upsert(table="engagements", data=record)
                 records_processed += 1
+            last_successful_date = start_date + timedelta(days=days_to_fetch)
         except (RuntimeError, requests.exceptions.HTTPError) as e:
             log.warning(f"Engagements fetch failed for {start_date}: {e}")
+            break
 
         start_date += timedelta(days=days_to_fetch)
 
-    state[state_key] = today.strftime("%Y-%m-%d")
+    state[state_key] = last_successful_date.strftime("%Y-%m-%d")
     op.checkpoint(state)
     log.info(f"Engagements sync complete: {records_processed} records")
     return state
@@ -691,7 +690,7 @@ def sync_advertisement_opportunities(api_key, publication_id, state):
             op.upsert(table="advertisement_opportunities", data=record)
             count += 1
         log.info(f"Advertisement opportunities sync complete: {count} records")
-    except RuntimeError as e:
+    except (RuntimeError, requests.exceptions.HTTPError) as e:
         log.warning(f"Could not fetch advertisement_opportunities: {e}")
 
     op.checkpoint(state)
