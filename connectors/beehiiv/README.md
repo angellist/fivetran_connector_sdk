@@ -129,7 +129,7 @@ Nested data:
 | `polls` | `id` | Full | Polls with choices and stats |
 | `condition_sets` | `id` | Full | Dynamic content condition sets |
 | `post_templates` | `id` | Full | Post template definitions |
-| `engagements` | `date` + `email_type` | Incremental (date) | Daily engagement metrics |
+| `engagements` | `date` | Incremental (date) | Daily engagement metrics (aggregated across email types) |
 | `advertisement_opportunities` | `id` | Full | Accepted ad opportunities |
 
 ## Additional considerations

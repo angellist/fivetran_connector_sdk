@@ -62,8 +62,8 @@ def validate_configuration(configuration: dict):
 def schema(configuration: dict):
     """Define the schema for all destination tables.
 
-    All tables use 'id' as the primary key (STRING) except engagements which uses a
-    composite key of date + email_type. Nested objects are stored as VARIANT columns
+    All tables use 'id' as the primary key (STRING) except engagements which uses 'date'.
+    Nested objects are stored as VARIANT columns
     (the SDK infers JSON columns automatically when dicts/lists are upserted).
 
     See the technical reference documentation for more details on the schema function:
