@@ -126,8 +126,9 @@ explicitly in the PR's Testing section and leave the `fivetran debug` checklist 
 
 For AWS sources, add a dedicated read-only IAM principal in `angellist/infra` (Pulumi,
 TypeScript):
-- **Native Fivetran connectors:** create an `aws.iam.Role` trusted by Fivetran's AWS account
-  `834469178297` with an `sts:ExternalId` condition (the External ID is tied to our Fivetran
+- **Native Fivetran connectors:** create an `aws.iam.Role` whose trust policy allows
+  Fivetran's AWS account `834469178297` to assume it (i.e. we extend trust to Fivetran),
+  gated on an `sts:ExternalId` condition (the External ID is tied to our Fivetran
   account — copy it from an existing Fivetran role's trust policy, e.g. `FivetranDynamoDBAccess`
   in support-services, or from the connection setup form). Scope the policy to the source
   resources; see `pulumi/jit/index.ts` (`fivetran-jit-reader`) for a DynamoDB example
