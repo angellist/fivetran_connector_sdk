@@ -1,6 +1,6 @@
 ---
 name: create-fivetran-connector
-description: "Step-by-step procedure for building a new custom Fivetran Connector SDK connector in this repo (angellist/fivetran_connector_sdk) that syncs a source (API, DynamoDB, etc.) into Snowflake. Covers scaffolding, schema()/update() patterns, upsert/checkpoint semantics, config placeholders, lint/format conventions, credentials via angellist/infra, README requirements, PR checklist, and MAR expectations. Use when asked to build a new data ingestion pipe or Fivetran connector."
+description: "Step-by-step procedure for building a new custom Fivetran Connector SDK connector in this repo (angellist/fivetran_connector_sdk) that syncs a source (API, DynamoDB, etc.) into Snowflake. Covers the native-connector-first decision rule, scaffolding, schema()/update() patterns, upsert/checkpoint semantics, config placeholders, lint/format conventions, credentials via angellist/infra, README requirements, PR checklist, and MAR expectations. Use when asked to build a new data ingestion pipe or Fivetran connector."
 ---
 
 # Create a Custom Fivetran Connector
@@ -8,11 +8,31 @@ description: "Step-by-step procedure for building a new custom Fivetran Connecto
 Use this skill to add a new custom connector under `connectors/<name>/` that pipes a
 source into the Snowflake warehouse via Fivetran's Connector SDK.
 
-Reference implementations in this repo:
+Reference implementation in this repo:
 - `connectors/beehiiv/` — REST API source, incremental sync with cursors, retry/backoff,
-  per-N-records checkpointing (the richest example).
-- `connectors/aws_jit/` — DynamoDB source, full-scan-per-sync, upsert-only history
-  preservation (built to outlive the source table's 90-day TTL).
+  per-N-records checkpointing.
+
+## 0. First decide: do you even need a custom connector?
+
+A custom connector is the **last resort**, not the default. Check in this order:
+
+1. **Native Fivetran connector exists for the source?** Use it. Fivetran maintains it, and
+   it handles state, retries, and delete capture (soft-deletes via `_fivetran_deleted`).
+   Company-specific filtering, renaming, and typing belong in a dbt staging model in
+   angellist/data-tooling — a staging layer exists for every source anyway, so ingest-time
+   shaping in a custom connector duplicates it.
+2. **No native connector?** Write a custom connector — but write it *generically*
+   (config-driven endpoints/tables/credentials, no company-specific column allowlists or
+   business filters), because the standard for connectors in this repo is that they could be
+   upstreamed to Fivetran's community examples and maintained there.
+3. If the connector can only be written by hardcoding one team's table layout or field list,
+   that shaping should move to dbt staging and the source should go through a native or
+   generic connector instead.
+
+Example: the `jit-access-requests` DynamoDB table was first piped with a bespoke `aws_jit`
+connector (PR #16, closed) and then reworked onto Fivetran's native DynamoDB connector +
+DynamoDB Streams + a dbt staging model, because the custom connector's METADATA filter and
+column map fit exactly one table and nobody else's use case.
 
 ## 1. Scaffold
 
@@ -69,9 +89,8 @@ Conventions (enforced by CI / reviewers):
 - Module-level constants prefixed `__` (e.g. `__PAGE_LIMIT = 100`), with a short comment each.
 - Column types: `STRING`, `INT`, `FLOAT`, `BOOLEAN`, `UTC_DATETIME`, `NAIVE_DATE`; dict/list
   values upserted as-is become `VARIANT` (JSON) automatically.
-- snake_case destination column names; map source camelCase explicitly via an allowlist dict
-  rather than passing raw items through (see `aws_jit`'s `__COLUMN_MAP`) — this keeps internal
-  plumbing fields out of the warehouse.
+- snake_case destination column names. Keep any column mapping config-driven or generic —
+  company-specific allowlists/renames belong in the dbt staging layer, not the connector.
 - Small pure helper functions (e.g. `map_item_to_row`) so logic is testable without the SDK.
 - Credentials come ONLY from `configuration` — never hardcoded, never read from env inside
   the connector.
@@ -82,12 +101,13 @@ Conventions (enforced by CI / reviewers):
   (e.g. `state["last_synced_at"]`), request only newer records, `op.checkpoint(state)` every
   N records (`beehiiv` uses 1000) so an interrupted sync resumes.
 - **Full rescan (small sources, ≤ tens of thousands of rows):** scan everything each sync and
-  upsert all rows; `op.checkpoint(state={})` at the end. Used by `aws_jit`.
+  upsert all rows; `op.checkpoint(state={})` at the end.
 - **History preservation:** if the source expires/deletes data (TTL) and the warehouse must
   retain it, NEVER emit `op.delete(...)` — upsert-only means rows survive in Snowflake after
-  the source drops them. Document this prominently in the README.
-- Deterministic primary keys: derive a stable `id` from the source (e.g. strip the
-  `REQUEST#` prefix from a DynamoDB PK). Upserts are idempotent on the primary key.
+  the source drops them. Document this prominently in the README. (Native connectors get the
+  same effect via `_fivetran_deleted` soft-deletes, which dbt staging can keep.)
+- Deterministic primary keys: derive a stable `id` from the source. Upserts are idempotent
+  on the primary key.
 
 ## 4. Verify locally
 
@@ -105,12 +125,18 @@ explicitly in the PR's Testing section and leave the `fivetran debug` checklist 
 ## 5. Credentials / least-privilege access (angellist/infra)
 
 For AWS sources, add a dedicated read-only IAM principal in `angellist/infra` (Pulumi,
-TypeScript — e.g. `pulumi/jit/index.ts` for the aws_jit connector):
-- `aws.iam.User` + inline `aws.iam.UserPolicy` scoped to exactly the actions/resources the
-  connector needs (e.g. `dynamodb:Scan` + `dynamodb:DescribeTable` on one table ARN).
-- Do NOT create an `aws.iam.AccessKey` resource (keeps the secret out of Pulumi state).
-  After `pulumi up`, an admin runs `aws iam create-access-key --user-name <user>` and pastes
-  the key into the Fivetran connection configuration.
+TypeScript):
+- **Native Fivetran connectors:** create an `aws.iam.Role` trusted by Fivetran's AWS account
+  `834469178297` with an `sts:ExternalId` condition (the External ID is tied to our Fivetran
+  account — copy it from an existing Fivetran role's trust policy, e.g. `FivetranDynamoDBAccess`
+  in support-services, or from the connection setup form). Scope the policy to the source
+  resources; see `pulumi/jit/index.ts` (`fivetran-jit-reader`) for a DynamoDB example
+  (Scan/DescribeTable + stream-read actions, streams enabled with `NEW_AND_OLD_IMAGES`).
+- **Custom connectors:** `aws.iam.User` + inline `aws.iam.UserPolicy` scoped to exactly the
+  actions/resources the connector needs. Do NOT create an `aws.iam.AccessKey` resource (keeps
+  the secret out of Pulumi state) — after `pulumi up`, an admin runs
+  `aws iam create-access-key --user-name <user>` and pastes the key into the Fivetran
+  connection configuration.
 - Verify with `bunx @biomejs/biome@2.3.2 check --diagnostic-level=error <file>`.
 
 For API sources, the API key is provisioned in the vendor's dashboard and stored only in the
